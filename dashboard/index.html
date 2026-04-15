@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bantay — DPWH Infrastructure Audit</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:        #F5F2ED;
+  --surface:   #FFFFFF;
+  --surface2:  #F9F7F4;
+  --border:    #E2DDD6;
+  --border2:   #CCC8BF;
+
+  --text:      #1C2333;
+  --text2:     #4A5264;
+  --muted:     #7C8494;
+  --faint:     #ADB3BE;
+
+  --navy:      #2C4A8C;
+  --navy-soft: #EEF1F8;
+
+  --red:       #C0392B;
+  --red-soft:  #FAEEED;
+  --amber:     #B7791F;
+  --amber-soft:#FDF3E3;
+  --green:     #276749;
+  --green-soft:#EAF4EE;
+
+  --serif: 'Lora', Georgia, serif;
+  --sans:  'IBM Plex Sans', system-ui, sans-serif;
+  --mono:  'IBM Plex Mono', 'Courier New', monospace;
+
+  --radius: 6px;
+  --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  --shadow-md: 0 4px 12px rgba(0,0,0,.08), 0 2px 4px rgba(0,0,0,.04);
+}
+
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+::selection { background: #c5cfe8; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 99px; }
+
+/* ── App shell ── */
+.app { display: grid; grid-template-rows: auto 1fr; height: 100vh; overflow: hidden; }
+
+/* ── Header ── */
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 28px;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-height: 58px;
+}
+.brand { display: flex; flex-direction: column; justify-content: center; padding-right: 28px; border-right: 1px solid var(--border); }
+.brand-name { font-family: var(--serif); font-size: 18px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; line-height: 1.2; }
+.brand-sub  { font-size: 11px; color: var(--muted); margin-top: 2px; letter-spacing: 0.02em; }
+
+.header-stats { display: flex; gap: 0; margin-left: 28px; }
+.hstat { display: flex; flex-direction: column; padding: 0 24px 0 0; }
+.hstat + .hstat { padding-left: 24px; border-left: 1px solid var(--border); }
+.hstat-val { font-family: var(--mono); font-size: 20px; font-weight: 500; line-height: 1; }
+.hstat-lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 3px; }
+
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.last-updated { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+
+/* ── Main layout ── */
+.main { display: grid; grid-template-columns: 38% 62%; overflow: hidden; }
+
+/* ── Table panel ── */
+.table-panel { display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+
+.toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.search-wrap { position: relative; flex: 1; max-width: 320px; }
+.search-wrap svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
+.search-wrap input {
+  width: 100%; padding: 7px 10px 7px 32px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--radius); font-family: var(--sans); font-size: 13px; color: var(--text);
+  outline: none; transition: border-color .15s, box-shadow .15s;
+}
+.search-wrap input::placeholder { color: var(--faint); }
+.search-wrap input:focus { border-color: var(--navy); box-shadow: 0 0 0 3px rgba(44,74,140,.08); }
+
+select {
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text2);
+  font-family: var(--sans); font-size: 12px; padding: 7px 10px;
+  border-radius: var(--radius); outline: none; cursor: pointer; appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237C8494' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 8px center; padding-right: 28px;
+  transition: border-color .15s;
+}
+select:focus { border-color: var(--navy); }
+
+.filter-count { font-size: 11px; color: var(--muted); margin-left: auto; font-family: var(--mono); }
+
+/* ── Table ── */
+.table-scroll { flex: 1; overflow-y: auto; background: var(--surface); }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+/* Fixed column widths — name gets remaining space, others are compact */
+thead th:nth-child(1) { width: auto; }       /* name: flexible */
+thead th:nth-child(2) { width: 70px; }        /* year */
+thead th:nth-child(3) { width: 120px; }       /* status badge */
+thead th:nth-child(4) { width: 72px; }        /* delta IBI */
+thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--sans); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted);
+  padding: 7px 12px; text-align: left; white-space: nowrap;
+  cursor: pointer; user-select: none;
+  transition: color .15s;
+}
+thead th:hover { color: var(--navy); }
+thead th.sorted { color: var(--navy); }
+thead th.sorted::after { content: attr(data-arrow); margin-left: 4px; }
+
+tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; transition: background .1s; }
+tbody tr:hover { background: #FAF8F5; }
+tbody tr.active { background: var(--navy-soft); border-left: 3px solid var(--navy); }
+tbody tr.active td:first-child { padding-left: 13px; }
+td { padding: 6px 12px; font-size: 12px; }
+
+
+.td-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.td-year { font-family: var(--mono); font-size: 12px; color: var(--text2); }
+
+/* ── Status badges ── */
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.02em; white-space: nowrap;
+}
+.badge-ghost   { background: var(--red-soft);   color: var(--red);   }
+.badge-suspect { background: var(--amber-soft);  color: var(--amber); }
+.badge-legit   { background: var(--green-soft);  color: var(--green); }
+.badge-nodata  { background: var(--surface2); color: var(--muted); border: 1px solid var(--border2); }
+.badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.badge-nodata::before { background: var(--faint); }
+
+/* ── Pagination ── */
+.pagination {
+  padding: 10px 20px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px;
+  background: var(--surface);
+}
+.page-info { font-size: 11px; color: var(--muted); font-family: var(--mono); flex: 1; }
+.btn {
+  background: var(--surface); border: 1px solid var(--border); color: var(--text2);
+  font-family: var(--sans); font-size: 12px; font-weight: 500;
+  padding: 5px 14px; border-radius: var(--radius); cursor: pointer;
+  transition: all .15s;
+}
+.btn:hover:not(:disabled) { border-color: var(--navy); color: var(--navy); background: var(--navy-soft); }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ── Detail panel ── */
+.detail-panel { overflow-y: auto; background: var(--bg); }
+
+.detail-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; gap: 14px; color: var(--faint); text-align: center; padding: 48px;
+}
+.detail-empty svg { opacity: 0.35; }
+.detail-empty h3 { font-family: var(--serif); font-size: 16px; color: var(--text2); font-weight: 500; }
+.detail-empty p { font-size: 12px; color: var(--muted); line-height: 1.7; max-width: 220px; }
+
+.detail-content { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+/* ── Detail sections ── */
+.section-label {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--faint); margin-bottom: 8px;
+}
+
+.project-header { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
+.project-id-tag { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-bottom: 6px; }
+.project-title { font-family: var(--serif); font-size: 15px; font-weight: 600; line-height: 1.4; color: var(--text); }
+.project-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.meta-pill {
+  background: var(--surface2); border: 1px solid var(--border);
+  padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; color: var(--text2); font-family: var(--mono);
+}
+
+/* ── Confidence card ── */
+.conf-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
+.conf-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.conf-pct { font-family: var(--serif); font-size: 36px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
+.conf-verdict-wrap { text-align: right; }
+.conf-verdict { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+.conf-desc { font-size: 11px; color: var(--muted); margin-top: 3px; max-width: 140px; text-align: right; line-height: 1.4; }
+.progress-track { background: var(--border); border-radius: 99px; height: 6px; overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 99px; transition: width .7s cubic-bezier(.4,0,.2,1); }
+
+/* ── Image compare ── */
+.img-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.img-tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+.img-tile-header { padding: 8px 12px 4px; display: flex; justify-content: space-between; align-items: center; }
+.img-tile-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); }
+.img-tile-year  { font-family: var(--mono); font-size: 10px; color: var(--faint); }
+.img-tile img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.img-tile-empty { width: 100%; aspect-ratio: 1; background: var(--surface2); display: flex; align-items: center; justify-content: center; }
+.img-tile-empty svg { opacity: 0.2; }
+
+/* ── Signal pattern card ── */
+.signal-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
+.signal-pattern-code { font-family: var(--mono); font-size: 15px; font-weight: 500; letter-spacing: 0.1em; margin-bottom: 4px; }
+.signal-interpretation { font-size: 12px; color: var(--text2); line-height: 1.5; }
+
+/* ── Signal matrix ── */
+.matrix-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); overflow-x: auto; }
+.matrix-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+/* Fixed column widths — name gets remaining space, others are compact */
+thead th:nth-child(1) { width: auto; }       /* name: flexible */
+thead th:nth-child(2) { width: 70px; }        /* year */
+thead th:nth-child(3) { width: 120px; }       /* status badge */
+thead th:nth-child(4) { width: 72px; }        /* delta IBI */
+.matrix-table th { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); padding: 0 0 10px 0; text-align: center; }
+.matrix-table th:first-child { text-align: left; width: 58px; }
+.matrix-col-header { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.matrix-col-radius { font-size: 9px; color: var(--faint); font-weight: 400; font-family: var(--mono); }
+.matrix-table td { padding: 3px 4px; vertical-align: middle; }
+.matrix-table td:first-child { font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--text2); padding-right: 8px; }
+.matrix-table tr + tr td { border-top: 1px solid var(--border); }
+
+/* Individual signal cell */
+.sig-cell {
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 4px; padding: 4px 2px;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  min-width: 52px;
+  transition: opacity .3s;
+}
+.sig-pos       { background: var(--green-soft); color: var(--green); }
+.sig-neg       { background: var(--red-soft);   color: var(--red);   }
+.sig-neutral   { background: var(--surface2);   color: var(--faint); }
+.sig-null      { background: transparent;        color: var(--faint); }
+
+/* Legend row */
+.matrix-legend { display: flex; gap: 14px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--muted); }
+.legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+
+/* ── Coords ── */
+.coords-row {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 14px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.coords-val { font-family: var(--mono); font-size: 12px; color: var(--text2); }
+.map-link { font-size: 11px; font-weight: 500; color: var(--navy); text-decoration: none; opacity: 0.8; transition: opacity .15s; }
+.map-link:hover { opacity: 1; text-decoration: underline; }
+
+/* ── Empty / loading states ── */
+.loading-row td { text-align: center; padding: 48px; color: var(--faint); font-size: 12px; }
+@keyframes shimmer { 0%,100%{opacity:.5} 50%{opacity:1} }
+.loading-row td { animation: shimmer 1.4s ease-in-out infinite; }
+
+.no-data td { text-align: center; padding: 48px; color: var(--muted); font-size: 13px; }
+
+/* ── Divider ── */
+.divider { border: none; border-top: 1px solid var(--border); margin: 0; }
+
+/* ── Data quality warning banner ── */
+.dq-banner {
+  background: #FFF8ED; border: 1px solid #E9C46A;
+  border-radius: var(--radius); padding: 10px 14px;
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-bottom: 10px;
+}
+.dq-banner svg { flex-shrink: 0; margin-top: 1px; color: #B7791F; }
+.dq-banner-text { font-size: 12px; color: var(--text2); line-height: 1.5; }
+.dq-banner-title { font-weight: 600; color: #B7791F; margin-bottom: 2px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+.dq-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  background: #FFF3CD; border: 1px solid #E9C46A;
+  color: #B7791F; padding: 1px 6px; border-radius: 4px;
+  font-size: 10px; font-weight: 600; font-family: var(--mono);
+}
+
+/* ── Expanded signal windows ── */
+.signal-windows { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
+.signal-window {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface2);
+}
+.signal-window.sw-detected { background: var(--green-soft); border-color: var(--green); }
+.signal-window.sw-absent   { background: var(--red-soft);   border-color: var(--red); }
+.sw-icon {
+  width: 20px; height: 20px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; font-size: 11px; font-weight: 700;
+}
+.sw-detected .sw-icon { background: var(--green); color: #fff; }
+.sw-absent   .sw-icon { background: var(--red);   color: #fff; }
+.sw-neutral  .sw-icon { background: var(--faint); color: #fff; }
+.sw-body { flex: 1; min-width: 0; }
+.sw-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.sw-meta  { font-size: 10px; color: var(--muted); font-weight: 400; margin-left: 4px; }
+.sw-desc  { font-size: 11px; color: var(--muted); margin-top: 1px; line-height: 1.4; }
+.sw-value { font-family: var(--mono); font-size: 11px; font-weight: 600; flex-shrink: 0; }
+.sw-detected .sw-value { color: var(--green); }
+.sw-absent   .sw-value { color: var(--red); }
+.sw-neutral  .sw-value { color: var(--faint); }
+.signal-summary {
+  margin-top: 10px; padding: 9px 12px;
+  background: var(--surface2); border-radius: var(--radius);
+  border: 1px solid var(--border);
+  font-size: 12px; color: var(--text2); line-height: 1.5;
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="brand-name">Bantay</div>
+      <div class="brand-sub">DPWH Infrastructure Audit · Satellite Change Detection</div>
+    </div>
+    <div class="header-stats">
+      <div class="hstat" style="padding-left:28px">
+        <div class="hstat-val" id="stat-total" style="color:var(--text)">—</div>
+        <div class="hstat-lbl">Projects Analyzed</div>
+      </div>
+      <div class="hstat">
+        <div class="hstat-val" id="stat-ghost" style="color:var(--red)">—</div>
+        <div class="hstat-lbl">Likely Ghost</div>
+      </div>
+      <div class="hstat">
+        <div class="hstat-val" id="stat-suspect" style="color:var(--amber)">—</div>
+        <div class="hstat-lbl">Needs Review</div>
+      </div>
+      <div class="hstat">
+        <div class="hstat-val" id="stat-legit" style="color:var(--green)">—</div>
+        <div class="hstat-lbl">Verified</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="last-updated" id="last-updated"></div>
+    </div>
+  </header>
+
+  <div class="main">
+
+    <!-- Table panel -->
+    <div class="table-panel">
+      <div class="toolbar">
+        <div class="search-wrap">
+          <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+          <input type="text" id="search" placeholder="Search by name, region, or ID…">
+        </div>
+        <select id="filter-confidence">
+          <option value="">All statuses</option>
+          <option value="ghost">Likely Ghost (&gt;70%)</option>
+          <option value="suspect">Needs Review (40–70%)</option>
+          <option value="legit">Verified (&lt;40%)</option>
+        </select>
+        <select id="filter-year">
+          <option value="">All years</option>
+        </select>
+        <div class="filter-count" id="filter-count"></div>
+      </div>
+
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th data-col="project_name">Project Name</th>
+              <th data-col="completion_year" title="Completion Year">Year</th>
+              <th data-col="ghost_probability">Status</th>
+              <th data-col="tight_ibi">Δ IBI</th>
+            </tr>
+          </thead>
+          <tbody id="table-body">
+            <tr class="loading-row"><td colspan="4">Loading projects…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pagination">
+        <span class="page-info" id="page-info"></span>
+        <button class="btn" id="prev-btn" disabled>← Previous</button>
+        <button class="btn" id="next-btn" disabled>Next →</button>
+      </div>
+    </div>
+
+    <!-- Detail panel -->
+    <div class="detail-panel" id="detail-panel">
+      <div class="detail-empty">
+        <svg width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24">
+          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>
+        </svg>
+        <h3>Select a project</h3>
+        <p>Click any row to view satellite composites, spectral index deltas, and ghost probability.</p>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── CONFIG ──────────────────────────────────────────────────────────────────
+const SUPABASE_URL     = 'https://rqnjuyxbfvzzwuwggrqe.supabase.co'
+const SUPABASE_ANON_KEY = 'sb_publishable_1xnrMb9Tof2K_PRGecTPEQ_JfCctKMO'
+const TABLE    = 'projects'
+const PAGE_SIZE = 50
+// ───────────────────────────────────────────────────────────────────────────
+
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+let state = {
+  page: 0, total: 0,
+  search: '', filterConf: '', filterYear: '',
+  sortCol: 'ghost_probability', sortDesc: true,
+  activeId: null,
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+const cls  = p => p >= 0.7 ? 'ghost' : p >= 0.4 ? 'suspect' : 'legit'
+const lbl  = p => p >= 0.7 ? 'Likely Ghost' : p >= 0.4 ? 'Needs Review' : 'Verified'
+const clr  = p => p >= 0.7 ? 'var(--red)' : p >= 0.4 ? 'var(--amber)' : 'var(--green)'
+const fmt  = (v,d=3) => v==null ? '—' : (v>=0?'+':'')+Number(v).toFixed(d)
+const iClr = v => v > 0.05 ? 'var(--green)' : v < -0.05 ? 'var(--red)' : 'var(--faint)'
+// Bad data: pipeline flagged OR all IBI null (black composite)
+const hasNoData = r => (r.data_quality && r.data_quality !== 'ok' && r.data_quality !== 'unknown') || (r.tight_ibi == null && r.broad_ibi == null && r.anywhere_ibi == null)
+
+// ── Header stats ─────────────────────────────────────────────────────────────
+async function loadStats() {
+  // Exclude projects where all IBI values are null (black composites / bad data)
+  // Those are counted separately as 'No Data' and should not inflate ghost/suspect/legit
+  const goodData = sb.from(TABLE).select('tight_ibi,broad_ibi,anywhere_ibi,data_quality,ghost_probability')
+  const { data: allRows } = await goodData
+  if (!allRows) return
+
+  const valid   = allRows.filter(r => !hasNoData(r))
+  const nodata  = allRows.filter(r =>  hasNoData(r))
+  const ghost   = valid.filter(r => r.ghost_probability >= 0.7)
+  const suspect = valid.filter(r => r.ghost_probability >= 0.4 && r.ghost_probability < 0.7)
+  const legit   = valid.filter(r => r.ghost_probability < 0.4)
+
+  document.getElementById('stat-total').textContent   = allRows.length.toLocaleString()
+  document.getElementById('stat-ghost').textContent   = ghost.length.toLocaleString()
+  document.getElementById('stat-suspect').textContent = suspect.length.toLocaleString()
+  document.getElementById('stat-legit').textContent   = legit.length.toLocaleString()
+  document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleDateString('en-PH', { year:'numeric', month:'short', day:'numeric' })
+}
+
+// ── Year filter ───────────────────────────────────────────────────────────────
+async function loadYears() {
+  const { data } = await sb.from(TABLE).select('completion_year').order('completion_year')
+  if (!data) return
+  const years = [...new Set(data.map(r => r.completion_year))].sort()
+  const sel = document.getElementById('filter-year')
+  years.forEach(y => { const o = document.createElement('option'); o.value = y; o.textContent = y; sel.appendChild(o) })
+}
+
+// ── Table query ───────────────────────────────────────────────────────────────
+function buildQuery() {
+  let q = sb.from(TABLE)
+    .select('project_id,project_name,region,completion_year,ghost_probability,tight_ibi,broad_ibi,anywhere_ibi,data_quality,composite_valid', { count:'exact' })
+    .order(state.sortCol, { ascending: !state.sortDesc })
+    .range(state.page * PAGE_SIZE, (state.page + 1) * PAGE_SIZE - 1)
+  if (state.search && state.search.trim() !== '') {
+    const s = `%${state.search.trim()}%`
+    q = q.or(`project_name.ilike.${s},region.ilike.${s},project_id.ilike.${s}`)
+  }
+  if (state.filterYear)  q = q.eq('completion_year', state.filterYear)
+  if (state.filterConf === 'ghost')   q = q.gte('ghost_probability', 0.7)
+  else if (state.filterConf === 'suspect') q = q.gte('ghost_probability', 0.4).lt('ghost_probability', 0.7)
+  else if (state.filterConf === 'legit')   q = q.lt('ghost_probability', 0.4)
+  return q
+}
+
+// ── Render table ──────────────────────────────────────────────────────────────
+async function loadTable() {
+  const body = document.getElementById('table-body')
+  body.innerHTML = '<tr class="loading-row"><td colspan="4">Loading…</td></tr>'
+
+  let data, count, error
+  try {
+    const res = await buildQuery()
+    data = res.data; count = res.count; error = res.error
+  } catch(e) {
+    body.innerHTML = `<tr class="no-data"><td colspan="4" style="line-height:1.8">
+      <strong>Connection error:</strong> ${e.message}<br>
+      <small>Check Supabase URL and key, and confirm the projects table exists.</small>
+    </td></tr>`
+    console.error('loadTable:', e)
+    return
+  }
+  if (error) {
+    console.error("Supabase error:", error)
+    body.innerHTML = `<tr class="no-data"><td colspan="4" style="line-height:1.8">
+      <strong>Query error:</strong> ${error.message || JSON.stringify(error)}<br>
+      <small>The projects table may not exist — run the SQL schema in Supabase first.</small>
+    </td></tr>`
+    return
+  }
+  state.total = count || 0
+  const start = state.page * PAGE_SIZE + 1
+  const end   = Math.min((state.page + 1) * PAGE_SIZE, state.total)
+  document.getElementById('page-info').textContent    = `${start.toLocaleString()}–${end.toLocaleString()} of ${state.total.toLocaleString()}`
+  document.getElementById('filter-count').textContent = state.total.toLocaleString() + ' results'
+  document.getElementById('prev-btn').disabled = state.page === 0
+  document.getElementById('next-btn').disabled = end >= state.total
+
+  if (!data?.length) { body.innerHTML = '<tr class="no-data"><td colspan="4">No projects match your filters.</td></tr>'; return }
+
+  body.innerHTML = data.map(r => {
+    const p      = r.ghost_probability ?? 0
+    const ibi    = r.tight_ibi ?? null
+    const noData = hasNoData(r)
+    const bdgCls = noData ? 'nodata' : cls(p)
+    const bdgLbl = noData ? 'No Satellite Data' : lbl(p)
+    return `
+    <tr data-id="${r.project_id}" class="${state.activeId === r.project_id ? 'active' : ''}">
+      <td class="td-name" title="${r.project_name || ''}">${r.project_name || '—'}</td>
+      <td class="td-year">${r.completion_year || '—'}</td>
+      <td><span class="badge badge-${bdgCls}">${bdgLbl}</span></td>
+      <td style="font-family:var(--mono);font-size:11px;color:${iClr(ibi)}">${ibi === null ? '—' : fmt(ibi)}</td>
+    </tr>`
+  }).join('')
+
+  body.querySelectorAll('tr[data-id]').forEach(row =>
+    row.addEventListener('click', () => loadDetail(row.dataset.id))
+  )
+}
+
+// ── Signal cell helper ────────────────────────────────────────────────────────
+// negativeSignal: indices where negative delta = construction (NDVI, TCG, etc.)
+const NEG_SIGNAL_INDICES = new Set(['NDVI','TCG','TCW','MNDWI'])
+
+function sigCell(val, indexName) {
+  if (val == null) return `<div class="sig-cell sig-null">—</div>`
+  const isConstructionPositive = NEG_SIGNAL_INDICES.has(indexName) ? val < -0.05 : val > 0.05
+  const isConstructionNegative = NEG_SIGNAL_INDICES.has(indexName) ? val > 0.05  : val < -0.05
+  const cls = isConstructionPositive ? 'sig-pos' : isConstructionNegative ? 'sig-neg' : 'sig-neutral'
+  return `<div class="sig-cell ${cls}">${fmt(val)}</div>`
+}
+
+function patternColor(pattern) {
+  const positives = (pattern.match(/\+/g) || []).length
+  if (positives >= 3) return 'var(--green)'
+  if (positives === 2) return 'var(--amber)'
+  if (positives === 1) return 'var(--amber)'
+  return 'var(--red)'
+}
+
+// ── Render detail ─────────────────────────────────────────────────────────────
+async function loadDetail(id) {
+  state.activeId = id
+  document.querySelectorAll('tbody tr').forEach(r => r.classList.toggle('active', r.dataset.id === id))
+
+  const panel = document.getElementById('detail-panel')
+  panel.innerHTML = '<div style="padding:32px;color:var(--faint);font-size:12px;font-family:var(--mono);animation:shimmer 1.2s infinite">Loading…</div>'
+
+  const { data: d, error } = await sb.from(TABLE).select('*').eq('project_id', id).single()
+  if (error || !d) { panel.innerHTML = '<div class="detail-empty"><p>Could not load project data.</p></div>'; return }
+
+  const p = d.ghost_probability ?? 0
+
+  // Indices with all three spatial windows
+  const INDEX_DEFS = [
+    { name:'IBI'  }, { name:'BUI'  }, { name:'TCB'  },
+    { name:'TCG'  }, { name:'MNDWI'}, { name:'NDVI' },
+    { name:'NDBI' }, { name:'NDTI' },
+  ]
+
+  // Get tight/broad/anywhere values for each index from DB columns
+  const getVal = (window, idx) => d[`${window}_${idx.toLowerCase()}`] ?? null
+
+  const descText = p >= 0.7
+    ? 'Satellite data shows no significant change in built-up surfaces between the reported construction period. Likely unbuilt.'
+    : p >= 0.4
+    ? 'Some spectral changes detected, but insufficient to confirm construction. Manual verification recommended.'
+    : 'Significant spectral changes consistent with construction activity detected at this location.'
+
+  const pattern = d.signal_pattern || '—'
+  const interpretation = d.signal_interpretation || 'Compute signal pattern to see interpretation.'
+
+  // Build signal matrix rows
+  const matrixRows = INDEX_DEFS.map(({ name }) => `
+    <tr>
+      <td>${name}</td>
+      <td>${sigCell(getVal('tight', name), name)}</td>
+      <td>${sigCell(getVal('broad', name), name)}</td>
+      <td>${sigCell(getVal('anywhere', name), name)}</td>
+    </tr>`).join('')
+
+  panel.innerHTML = `
+  <div class="detail-content">
+
+    <div class="project-header">
+      <div class="project-id-tag">${d.project_id}</div>
+      <div class="project-title">${d.project_name || 'Unnamed Project'}</div>
+      <div class="project-meta">
+        ${d.region          ? `<span class="meta-pill">${d.region}</span>` : ''}
+        ${d.start_year      ? `<span class="meta-pill">${d.start_year} → ${d.completion_year}</span>` : ''}
+        ${d.contract_amount ? `<span class="meta-pill">₱${(d.contract_amount/1e6).toFixed(1)}M</span>` : ''}
+        ${d.contractor      ? `<span class="meta-pill">${d.contractor}</span>` : ''}
+      </div>
+    </div>
+
+    <!-- Ghost probability -->
+    <div class="conf-card">
+      <div class="section-label">Ghost Probability</div>
+      ${(d.tight_ibi == null && d.broad_ibi == null && d.anywhere_ibi == null) ? `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 0">
+        <div class="conf-pct" style="color:var(--faint);font-size:28px">${(p*100).toFixed(1)}%</div>
+        <div style="font-size:12px;color:var(--muted);line-height:1.5">
+          <strong style="color:var(--amber);font-size:11px;text-transform:uppercase;letter-spacing:.06em">⚠ Unreliable Score</strong><br>
+          No spectral data — all composite pixels were cloud-masked.<br>
+          Score derived from pattern anchor only, not actual satellite signal.
+        </div>
+      </div>` : `
+      <div class="conf-top">
+        <div class="conf-pct" style="color:${clr(p)}">${(p*100).toFixed(1)}%</div>
+        <div class="conf-verdict-wrap">
+          <div class="conf-verdict" style="color:${clr(p)}">${lbl(p)}</div>
+          <div class="conf-desc">${descText}</div>
+        </div>
+      </div>`}
+      <div class="progress-track">
+        <div class="progress-fill" style="width:${(d.tight_ibi==null&&d.broad_ibi==null&&d.anywhere_ibi==null)?50:p*100}%;background:${(d.tight_ibi==null&&d.broad_ibi==null&&d.anywhere_ibi==null)?'var(--faint)':clr(p)}"></div>
+      </div>
+    </div>
+
+    <!-- Signal pattern — expanded three-window display -->
+    <div class="signal-card">
+      <div class="section-label">Spatial Signal Pattern</div>
+      ${(()=>{
+        const THR = 0.05
+        const windows = [
+          { key:'tight',    label:'Tight',    radius:'30m',  reducer:'mean', val: d.tight_ibi    ?? null, desc:'Did construction occur at the reported coordinate?' },
+          { key:'broad',    label:'Broad',    radius:'100m', reducer:'mean', val: d.broad_ibi    ?? null, desc:'Did construction occur in the general vicinity?' },
+          { key:'anywhere', label:'Anywhere', radius:'150m', reducer:'max',  val: d.anywhere_ibi ?? null, desc:'Did construction occur anywhere nearby?' },
+        ]
+        const rows = windows.map(w => {
+          const hasData  = w.val !== null
+          const detected = hasData && w.val > THR
+          const cls      = detected ? 'sw-detected' : hasData ? 'sw-absent' : 'sw-neutral'
+          const icon     = detected ? '✓' : hasData ? '✗' : '?'
+          const valStr   = hasData ? (w.val >= 0 ? '+' : '') + w.val.toFixed(3) : '—'
+          return `<div class="signal-window ${cls}">
+            <div class="sw-icon">${icon}</div>
+            <div class="sw-body">
+              <div class="sw-title">${w.label} <span class="sw-meta">${w.radius} · ${w.reducer}</span></div>
+              <div class="sw-desc">${w.desc}</div>
+            </div>
+            <div class="sw-value">Δ IBI ${valStr}</div>
+          </div>`
+        }).join('')
+        return `<div class="signal-windows">${rows}</div>
+                <div class="signal-summary">${interpretation}</div>`
+      })()}
+    </div>
+
+    <!-- Satellite thumbnails + data quality banner -->
+    <div>
+      <div class="section-label">Satellite Composites</div>
+
+      ${(()=>{
+        const dq = d.data_quality
+        const bn = d.before_scene_count
+        const an = d.after_scene_count
+
+        // Two ways to detect bad data:
+        // 1. Pipeline flagged it via data_quality column
+        // 2. ALL IBI values are null — composite was black (all pixels masked)
+        //    even if scene count looked OK (e.g. 7 scenes but all cloudy at location)
+        const pipelineFlagged = dq && dq !== 'ok' && dq !== 'unknown' && dq !== null
+        const allNull = d.tight_ibi == null && d.broad_ibi == null && d.anywhere_ibi == null
+        const showWarning = pipelineFlagged || allNull
+
+        if (!showWarning) return ''
+
+        // Build reason string
+        const parts = []
+        if (bn != null && bn < 3) parts.push(`before: ${bn} scene${bn===1?'':'s'}`)
+        else if (bn != null && allNull) parts.push(`before: ${bn} scenes (all pixels clouded at this location)`)
+        if (an != null && an < 3) parts.push(`after: ${an} scene${an===1?'':'s'}`)
+        else if (an != null && allNull && an >= 3) parts.push(`after: ${an} scenes (OK)`)
+
+        const detail = parts.length
+          ? parts.join(' · ')
+          : 'Cloud-masked pixels produced an empty composite at this location.'
+
+        return `<div class="dq-banner">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          <div class="dq-banner-text">
+            <div class="dq-banner-title">Insufficient Satellite Data</div>
+            ${detail}. Sentinel-2 SR has reliable PH coverage from mid-2017 — early projects may have all pixels cloud-masked even when scenes exist.
+            <strong>No valid spectral delta — ghost score is unreliable for this project.</strong>
+          </div>
+        </div>`
+      })()}
+
+      <div class="img-grid">
+        <div class="img-tile">
+          <div class="img-tile-header">
+            <span class="img-tile-label">Before</span>
+            <span style="display:flex;align-items:center;gap:5px">
+              ${d.before_scene_count != null ? `<span class="dq-badge">${d.before_scene_count} scenes</span>` : ''}
+              <span class="img-tile-year">${(d.start_year||2020)-1}–${d.start_year||2020}</span>
+            </span>
+          </div>
+          ${d.before_thumb_url
+            ? `<img src="${d.before_thumb_url}" alt="Before" loading="lazy">`
+            : `<div class="img-tile-empty" style="flex-direction:column;gap:6px">
+                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="opacity:.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                <span style="font-size:10px;color:var(--faint)">No imagery</span>
+              </div>`}
+        </div>
+        <div class="img-tile">
+          <div class="img-tile-header">
+            <span class="img-tile-label">After</span>
+            <span style="display:flex;align-items:center;gap:5px">
+              ${d.after_scene_count != null ? `<span class="dq-badge">${d.after_scene_count} scenes</span>` : ''}
+              <span class="img-tile-year">${d.completion_year||2022}–${(d.completion_year||2022)+1}</span>
+            </span>
+          </div>
+          ${d.after_thumb_url
+            ? `<img src="${d.after_thumb_url}" alt="After" loading="lazy">`
+            : `<div class="img-tile-empty" style="flex-direction:column;gap:6px">
+                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="opacity:.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                <span style="font-size:10px;color:var(--faint)">No imagery</span>
+              </div>`}
+        </div>
+      </div>
+    </div>
+
+    <!-- Signal matrix -->
+    <div class="matrix-card">
+      <div class="section-label">Spectral Index Δ by Spatial Window · after − before</div>
+      <table class="matrix-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>
+              <div class="matrix-col-header">
+                Tight<div class="matrix-col-radius">mean @ 30m</div>
+              </div>
+            </th>
+            <th>
+              <div class="matrix-col-header">
+                Broad<div class="matrix-col-radius">mean @ 100m</div>
+              </div>
+            </th>
+            <th>
+              <div class="matrix-col-header">
+                Anywhere<div class="matrix-col-radius">max @ 150m</div>
+              </div>
+            </th>
+          </tr>
+        </thead>
+        <tbody>${matrixRows}</tbody>
+      </table>
+      <div class="matrix-legend">
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--green-soft);border:1px solid var(--green)"></div>
+          Construction signal
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--red-soft);border:1px solid var(--red)"></div>
+          No signal / reversal
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot" style="background:var(--surface2);border:1px solid var(--border2)"></div>
+          Below threshold (±0.05)
+        </div>
+      </div>
+    </div>
+
+    <div class="coords-row">
+      <div class="coords-val">${d.latitude?.toFixed(6)}, ${d.longitude?.toFixed(6)}</div>
+      <a class="map-link" href="https://www.google.com/maps?q=${d.latitude},${d.longitude}" target="_blank">Open in Maps ↗</a>
+    </div>
+
+  </div>`
+}
+
+// ── Sort ──────────────────────────────────────────────────────────────────────
+document.querySelectorAll('thead th[data-col]').forEach(th => {
+  th.addEventListener('click', () => {
+    const col = th.dataset.col
+    if (state.sortCol === col) state.sortDesc = !state.sortDesc
+    else { state.sortCol = col; state.sortDesc = true }
+    state.page = 0
+    document.querySelectorAll('thead th').forEach(h => { h.classList.remove('sorted'); h.removeAttribute('data-arrow') })
+    th.classList.add('sorted')
+    th.setAttribute('data-arrow', state.sortDesc ? '↓' : '↑')
+    loadTable()
+  })
+})
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+let debounce
+document.getElementById('search').addEventListener('input', e => {
+  clearTimeout(debounce)
+  debounce = setTimeout(() => { state.search = e.target.value; state.page = 0; loadTable() }, 280)
+})
+document.getElementById('filter-confidence').addEventListener('change', e => { state.filterConf = e.target.value; state.page = 0; loadTable() })
+document.getElementById('filter-year').addEventListener('change', e => { state.filterYear = e.target.value; state.page = 0; loadTable() })
+document.getElementById('prev-btn').addEventListener('click', () => { state.page--; loadTable() })
+document.getElementById('next-btn').addEventListener('click', () => { state.page++; loadTable() })
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadStats().catch(e => console.warn('loadStats:', e))
+loadYears().catch(e => console.warn('loadYears:', e))
+loadTable().catch(e => console.error('loadTable:', e))
+</script>
+</body>
+</html>
