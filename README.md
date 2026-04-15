@@ -8,6 +8,14 @@ Tyron Rex Frago, April 2026
 
 This project uses Sentinel-2 satellite imagery and Google Earth Engine to verify whether Philippine DPWH flood control projects marked as completed were actually built. For each of 248,000 project records, GIST computes spectral change across three spatial sampling windows before and after the reported construction period. The most common signal pattern found was construction detectable only at 150 metres from the contracted coordinate, consistent with the site-mismatch fraud type the Commission on Audit documented in its 2025 Bulacan fraud audit reports.
 
+## Live Demo
+
+[Access the project here](https://tdfrago.github.io/yale-environmental-data-science-capstone/)
+
+## Data Status
+
+- Current dataset: **500 data points**
+- Ingestion in progress: **+24,000 records**
 ---
 
 ## Project Rationale
