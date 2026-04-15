@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GIST</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Lora:wght@500;600&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -219,6 +221,9 @@ td { padding: 6px 12px; font-size: 12px; }
 .img-tile img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
 .img-tile-empty { width: 100%; aspect-ratio: 1; background: var(--surface2); display: flex; align-items: center; justify-content: center; }
 .img-tile-empty svg { opacity: 0.2; }
+.sat-map { width: 100%; aspect-ratio: 1; }
+/* suppress Leaflet's default attribution clutter on small tiles */
+.sat-map .leaflet-control-attribution { font-size: 8px; opacity: 0.5; }
 
 /* ── Signal pattern card ── */
 .signal-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
@@ -728,8 +733,8 @@ async function loadDetail(id) {
               <span class="img-tile-year">${(d.start_year||2020)-1}–${d.start_year||2020}</span>
             </span>
           </div>
-          ${d.before_thumb_url
-            ? `<img src="${d.before_thumb_url}" alt="Before" loading="lazy">`
+          ${d.before_tile_url
+            ? `<div id="sat-map-before" class="sat-map"></div>`
             : `<div class="img-tile-empty" style="flex-direction:column;gap:6px">
                 <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="opacity:.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                 <span style="font-size:10px;color:var(--faint)">No imagery</span>
@@ -743,8 +748,8 @@ async function loadDetail(id) {
               <span class="img-tile-year">${d.completion_year||2022}–${(d.completion_year||2022)+1}</span>
             </span>
           </div>
-          ${d.after_thumb_url
-            ? `<img src="${d.after_thumb_url}" alt="After" loading="lazy">`
+          ${d.after_tile_url
+            ? `<div id="sat-map-after" class="sat-map"></div>`
             : `<div class="img-tile-empty" style="flex-direction:column;gap:6px">
                 <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="opacity:.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                 <span style="font-size:10px;color:var(--faint)">No imagery</span>
@@ -801,6 +806,74 @@ async function loadDetail(id) {
     </div>
 
   </div>`
+
+  // Init Leaflet maps after innerHTML is set — DOM elements now exist
+  initSatelliteMaps(d)
+}
+
+// ── Satellite tile maps ───────────────────────────────────────────────────────
+// Track active Leaflet instances so we can destroy them on the next loadDetail
+// call — Leaflet throws if you re-initialize on an already-initialized div.
+let _satMaps = []
+
+// GEE tile URLs from getMapId() contain '/maps/' and end in '{z}/{x}/{y}'
+// Legacy thumbnail URLs from getThumbURL() contain '/thumbnails/' and ':getPixels'
+// The two are NOT interchangeable — tile URLs go to Leaflet, thumbnails go to <img>
+function isTileUrl(url) {
+  return url && url.includes('/maps/') && url.includes('{z}')
+}
+
+function initSatelliteMaps(d) {
+  _satMaps.forEach(m => m.remove())
+  _satMaps = []
+
+  const lat  = d.latitude
+  const lon  = d.longitude
+  const zoom = 15
+
+  function makeMap(elId, url) {
+    const el = document.getElementById(elId)
+    if (!el || !url) return
+
+    if (isTileUrl(url)) {
+      // ── Permanent XYZ tile URL (new pipeline) → Leaflet ───────────────────
+      const map = L.map(el, {
+        center:             [lat, lon],
+        zoom,
+        zoomControl:        false,
+        attributionControl: true,
+        scrollWheelZoom:    false,
+        dragging:           true,
+      })
+      L.tileLayer(url, {
+        attribution: '© Google Earth Engine / Copernicus S2',
+        tileSize:    256,
+        maxZoom:     18,
+      }).addTo(map)
+      L.circleMarker([lat, lon], {
+        radius: 5, color: '#fff', fillColor: '#2C4A8C', fillOpacity: 1, weight: 2,
+      }).addTo(map)
+      _satMaps.push(map)
+
+    } else {
+      // ── Legacy signed thumbnail URL (old pipeline) → plain <img> ──────────
+      // These expire in ~2 days. Re-run the pipeline to get permanent tile URLs.
+      const img = document.createElement('img')
+      img.src             = url
+      img.alt             = elId.includes('before') ? 'Before' : 'After'
+      img.style.cssText   = 'width:100%;aspect-ratio:1;object-fit:cover;display:block'
+      img.onerror = () => {
+        el.innerHTML = `<div class="img-tile-empty" style="flex-direction:column;gap:6px">
+          <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24" style="opacity:.2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          <span style="font-size:10px;color:var(--faint)">Imagery expired — re-run pipeline</span>
+        </div>`
+      }
+      el.appendChild(img)
+    }
+  }
+
+  makeMap('sat-map-before', d.before_tile_url)
+  makeMap('sat-map-after',  d.after_tile_url)
 }
 
 // ── Sort ──────────────────────────────────────────────────────────────────────

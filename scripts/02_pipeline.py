@@ -1,13 +1,21 @@
 """
-02_pipeline.py  (v3 — parallel threads + skip-thumbs)
-======================================================
+02_pipeline.py  (v4 — parallel windows + parallel QA + checkpoint resume)
+==========================================================================
 
 Parallelism strategy:
-  - ThreadPoolExecutor for date groups within each batch
+  - ThreadPoolExecutor for date groups within each batch (SPECTRAL_WORKERS=6)
     Each (start_year, completion_year) group is independent — different
     composite pairs, different reduceRegions calls. Threads fire multiple
     GEE HTTP requests simultaneously. GIL releases during HTTP I/O so
     threading actually works here (unlike multiprocessing which breaks GEE).
+
+  - ThreadPoolExecutor for the 3 spatial windows inside each date group
+    Previously sequential; now all 3 reduceRegions calls fire in parallel.
+    This is the dominant cost per group — parallelising saves ~2/3 of
+    window time, the single biggest speedup in this version.
+
+  - ThreadPoolExecutor for QA checks (before/after scene count + pixel check)
+    Previously 4 serial GEE calls; now before+after run simultaneously.
 
   - ThreadPoolExecutor for thumbnails
     Each getThumbURL is one HTTP request. Highly parallelizable.
@@ -17,20 +25,31 @@ Parallelism strategy:
     Larger batches = more date-pair sharing = fewer composite builds total.
     50 is the sweet spot before GEE memory pressure increases.
 
+  - Checkpoint: results written after every batch so a crash never loses more
+    than one batch. On restart the script detects the checkpoint and skips
+    already-processed project IDs automatically.
+
 Why NOT multiprocessing:
   GEE objects (ee.Image, ee.FeatureCollection etc.) are not picklable.
   multiprocessing.Pool fails on Windows. ThreadPoolExecutor is correct here.
+
+Max concurrent GEE requests per date-group thread:
+  QA phase:      2  (before + after scene/pixel checks in parallel)
+  Window phase:  3  (tight + broad + anywhere reduceRegions in parallel)
+  Thumb phase:   THUMB_WORKERS (default 5)
+  Across all spectral workers: SPECTRAL_WORKERS × max(3, THUMB_WORKERS)
+  Default: 6 × 5 = 30 — well within GEE non-commercial quota.
 
 Usage:
   python 02_pipeline.py --input flood_projects.csv --output results.csv --project ee-fragotyron
   python 02_pipeline.py --input flood_projects.csv --output results.csv --project ee-fragotyron --test
   python 02_pipeline.py --input flood_projects.csv --output results.csv --project ee-fragotyron --skip-thumbs
-  python 02_pipeline.py --input flood_projects.csv --output results.csv --project ee-fragotyron --workers 6
+  python 02_pipeline.py --input flood_projects.csv --output results.csv --project ee-fragotyron --spectral-workers 8
 """
 
 import ee
+import os
 import pandas as pd
-import time
 import argparse
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,11 +71,10 @@ BATCH_SIZE = 50
 # - THUMB_WORKERS:    parallel thumbnail requests
 # GEE non-commercial quota is generous for concurrent requests.
 # Don't exceed 8 — GEE will start throttling and raising EEException.
-SPECTRAL_WORKERS = 4
+SPECTRAL_WORKERS = 6
 THUMB_WORKERS    = 5
 
-THUMB_BUFFER_M = 500
-THUMB_SIZE     = 256
+THUMB_BUFFER_M = 500   # buffer around project point for tile viewport
 
 WINDOWS = [
     {"name": "tight",    "radius": 30,  "reducer": "mean"},
@@ -281,19 +299,28 @@ def compute_indices(img):
     ]).select(INDEX_NAMES)
 
 
-# ── THUMBNAILS ────────────────────────────────────────────────────────────────
-def make_thumb_url(lat, lon, s, e):
+# ── TILE URLS (permanent, no expiry) ─────────────────────────────────────────
+def make_tile_url(lat, lon, s, e):
     """
-    Median composite JPEG thumbnail for one project location.
-    - Median (not single scene) -> no cloud artifacts
-    - Divided by 10000 via mask_clouds -> min/max in [0.02, 0.25] not [0, 3000]
-    - 500m buffer -> large enough to see the structure
+    Returns a permanent GEE XYZ tile URL via getMapId() instead of a signed
+    thumbnail via getThumbURL().
+
+    Why tile URLs instead of thumbnails:
+    - getThumbURL() returns a pre-signed JPEG that expires in ~2-3 days.
+    - getMapId() returns an XYZ tile endpoint that is permanent and public —
+      no re-authentication, no re-download needed at 24k scale.
+    - The URL works directly in Leaflet: L.tileLayer(url).addTo(map)
+    - No hosting costs — tiles are streamed on demand from GEE.
+
+    Trade-off: getMapId() is slightly slower per call than getThumbURL()
+    because GEE pre-renders the tile pyramid server-side. Parallelism in
+    generate_tiles_parallel() compensates for this.
     """
     try:
         pt  = ee.Geometry.Point([lon, lat])
         aoi = pt.buffer(THUMB_BUFFER_M).bounds()
 
-        def thumb_col(start, end, max_cloud):
+        def tile_col(start, end, max_cloud):
             return (
                 ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
                   .filterBounds(aoi)
@@ -303,36 +330,36 @@ def make_thumb_url(lat, lon, s, e):
                   .select(["B4", "B3", "B2"])
             )
 
-        col      = thumb_col(s, e, 60)
-        fallback = thumb_col(f"{s[:4]}-01-01", f"{s[:4]}-12-31", 80)
+        col      = tile_col(s, e, 60)
+        fallback = tile_col(f"{s[:4]}-01-01", f"{s[:4]}-12-31", 80)
         col      = ee.ImageCollection(ee.Algorithms.If(col.size().gte(3), col, fallback))
 
-        return col.median().getThumbURL({
-            "bands":      ["B4", "B3", "B2"],
-            "min":        0.02,
-            "max":        0.25,
-            "gamma":      1.4,
-            "region":     aoi,
-            "dimensions": THUMB_SIZE,
-            "format":     "jpg",
+        map_id = col.median().getMapId({
+            "bands": ["B4", "B3", "B2"],
+            "min":   0.02,
+            "max":   0.25,
+            "gamma": 1.4,
         })
+
+        # url_format is the permanent {z}/{x}/{y} tile template
+        return map_id["tile_fetcher"].url_format
+
     except Exception as exc:
-        print(f"  [THUMB WARN] ({lat:.4f},{lon:.4f}): {exc}")
+        print(f"  [TILE WARN] ({lat:.4f},{lon:.4f}): {exc}")
         return None
 
 
-def generate_thumbs_parallel(group_rows, bs, be, as_, ae, workers):
+def generate_tiles_parallel(group_rows, bs, be, as_, ae, workers):
     """
-    Generate before/after thumbnails for all projects in a group
-    using a ThreadPoolExecutor. Each getThumbURL is one HTTP request
-    to GEE — fully safe to parallelise with threads.
+    Generate before/after tile URLs for all projects in a group in parallel.
+    Each getMapId() is one HTTP request to GEE — safe to parallelise with threads.
     """
-    thumb_results = {}
+    tile_results = {}
 
     def fetch(row):
-        pid = str(row["project_id"])
-        before = make_thumb_url(row["latitude"], row["longitude"], bs, be)
-        after  = make_thumb_url(row["latitude"], row["longitude"], as_, ae)
+        pid    = str(row["project_id"])
+        before = make_tile_url(row["latitude"], row["longitude"], bs, be)
+        after  = make_tile_url(row["latitude"], row["longitude"], as_, ae)
         return pid, before, after
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -341,13 +368,13 @@ def generate_thumbs_parallel(group_rows, bs, be, as_, ae, workers):
         for fut in as_completed(futures):
             try:
                 pid, before, after = fut.result()
-                thumb_results[pid] = (before, after)
+                tile_results[pid] = (before, after)
             except Exception as exc:
                 pid = str(futures[fut])
-                print(f"  [THUMB ERR] {pid}: {exc}")
-                thumb_results[pid] = (None, None)
+                print(f"  [TILE ERR] {pid}: {exc}")
+                tile_results[pid] = (None, None)
 
-    return thumb_results
+    return tile_results
 
 
 # ── PROCESS ONE DATE GROUP ────────────────────────────────────────────────────
@@ -358,11 +385,12 @@ def process_date_group(group, sy, cy, skip_thumbs, thumb_workers):
     This function is the unit of parallelism — it runs in its own thread
     within a ThreadPoolExecutor. Each date group:
       1. Builds ONE pair of composites (shared by all projects in the group)
-      2. Runs 3 reduceRegions calls (one per spatial window)
-      3. Generates thumbnails in a nested ThreadPoolExecutor
+      2. Runs QA checks for before + after composites IN PARALLEL (2 threads)
+      3. Runs all 3 spatial windows IN PARALLEL (3 threads, biggest speedup)
+      4. Generates thumbnails in a nested ThreadPoolExecutor
 
-    Thread safety: this function only writes to its own local dict and
-    returns it — no shared mutable state between threads.
+    Thread safety: each nested executor writes to isolated local structures
+    and returns results — no shared mutable state between threads.
     """
     bs, be  = before_window(sy)
     as_, ae = after_window(cy)
@@ -375,9 +403,7 @@ def process_date_group(group, sy, cy, skip_thumbs, thumb_workers):
     # input df and are preserved through the merge in run(). Adding them here
     # causes pandas to create latitude_x/latitude_y duplicate columns.
     group_results = {
-        str(r["project_id"]): {
-            "project_id": str(r["project_id"]),
-        }
+        str(r["project_id"]): {"project_id": str(r["project_id"])}
         for _, r in group.iterrows()
     }
 
@@ -392,28 +418,23 @@ def process_date_group(group, sy, cy, skip_thumbs, thumb_workers):
     before_c = build_composite(aoi, bs, be)
     after_c  = build_composite(aoi, as_, ae)
 
-    # DATA QUALITY: two-stage check
-    # Stage 1: count scenes (fast, catches pre-S2 era)
-    # Stage 2: verify composite actually has non-zero pixels (catches "7 scenes
-    #          but all cloudy at this location" — the black image problem)
-    before_scenes = count_scenes(aoi, bs, be)
-    after_scenes  = count_scenes(aoi, as_, ae)
+    # ── QA: before + after checks run IN PARALLEL ─────────────────────────────
+    # Previously 4 serial GEE calls; now before/after fire simultaneously.
+    # Stage 1: count scenes (catches pre-S2 era)
+    # Stage 2: pixel-level check (catches "7 scenes but all cloudy here")
+    def qa_check(composite, s, e):
+        n  = count_scenes(aoi, s, e)
+        ok = composite_has_data(composite, aoi) if n >= 3 else False
+        return n, ok
 
-    # Stage 2 only needed when scene count looks plausible (>=3)
-    # — avoids extra GEE calls for the obvious pre-S2 cases
-    if before_scenes >= 3:
-        before_ok = composite_has_data(before_c, aoi)
-    else:
-        before_ok = False  # 0-2 scenes → definitely invalid
-
-    if after_scenes >= 3:
-        after_ok = composite_has_data(after_c, aoi)
-    else:
-        after_ok = False
+    with ThreadPoolExecutor(max_workers=2) as qa_pool:
+        f_before = qa_pool.submit(qa_check, before_c, bs, be)
+        f_after  = qa_pool.submit(qa_check, after_c,  as_, ae)
+        before_scenes, before_ok = f_before.result()
+        after_scenes,  after_ok  = f_after.result()
 
     data_ok = before_ok and after_ok
-
-    status = "OK" if data_ok else (
+    status  = "OK" if data_ok else (
         f"INVALID -- before={'OK' if before_ok else f'EMPTY ({before_scenes} scenes)'} "
         f"after={'OK' if after_ok else f'EMPTY ({after_scenes} scenes)'}"
     )
@@ -425,14 +446,16 @@ def process_date_group(group, sy, cy, skip_thumbs, thumb_workers):
         group_results[pid]["after_scene_count"]  = after_scenes
         group_results[pid]["composite_valid"]    = data_ok
 
-    delta    = (compute_indices(after_c)
-                .subtract(compute_indices(before_c))
-                .select(INDEX_NAMES))
+    delta = (compute_indices(after_c)
+             .subtract(compute_indices(before_c))
+             .select(INDEX_NAMES))
 
-    # Three spatial windows — sequential within the group (each is fast server-side)
-    for w in WINDOWS:
+    # ── 3 spatial windows — now run IN PARALLEL ───────────────────────────────
+    # Previously sequential; each is an independent reduceRegions HTTP call.
+    # Running all 3 simultaneously cuts window time by ~2/3 — the biggest
+    # single speedup in this version.
+    def run_window(w):
         reducer = ee.Reducer.mean() if w["reducer"] == "mean" else ee.Reducer.max()
-
         fc = ee.FeatureCollection([
             ee.Feature(
                 ee.Geometry.Point([r["longitude"], r["latitude"]]).buffer(w["radius"]),
@@ -440,7 +463,6 @@ def process_date_group(group, sy, cy, skip_thumbs, thumb_workers):
             )
             for _, r in group.iterrows()
         ])
-
         try:
             sampled = delta.reduceRegions(
                 collection=fc,
@@ -448,31 +470,38 @@ def process_date_group(group, sy, cy, skip_thumbs, thumb_workers):
                 scale=20,
                 tileScale=8,
             ).getInfo()["features"]
-
-            for feat in sampled:
-                pid   = str(feat["properties"]["project_id"])
-                props = feat["properties"]
-                for idx in INDEX_NAMES:
-                    group_results[pid][f"{w['name']}_{idx.lower()}"] = props.get(idx)
-
+            return w["name"], sampled, None
         except Exception as exc:
-            print(f"  [WARN] Window '{w['name']}' ({sy}->{cy}): {exc}")
-            for _, r in group.iterrows():
-                pid = str(r["project_id"])
-                for idx in INDEX_NAMES:
-                    group_results[pid][f"{w['name']}_{idx.lower()}"] = None
+            return w["name"], None, exc
 
-    # Thumbnails — parallel per project within this group
+    with ThreadPoolExecutor(max_workers=len(WINDOWS)) as win_pool:
+        win_futures = {win_pool.submit(run_window, w): w["name"] for w in WINDOWS}
+        for fut in as_completed(win_futures):
+            wname, sampled, exc = fut.result()
+            if exc:
+                print(f"  [WARN] Window '{wname}' ({sy}->{cy}): {exc}")
+                for _, r in group.iterrows():
+                    pid = str(r["project_id"])
+                    for idx in INDEX_NAMES:
+                        group_results[pid][f"{wname}_{idx.lower()}"] = None
+            else:
+                for feat in sampled:
+                    pid   = str(feat["properties"]["project_id"])
+                    props = feat["properties"]
+                    for idx in INDEX_NAMES:
+                        group_results[pid][f"{wname}_{idx.lower()}"] = props.get(idx)
+
+    # Tile URLs — permanent XYZ tiles, no expiry, stream on demand from GEE
     if not skip_thumbs:
-        thumbs = generate_thumbs_parallel(group, bs, be, as_, ae, thumb_workers)
-        for pid, (before_url, after_url) in thumbs.items():
-            group_results[pid]["before_thumb_url"] = before_url
-            group_results[pid]["after_thumb_url"]  = after_url
+        tiles = generate_tiles_parallel(group, bs, be, as_, ae, thumb_workers)
+        for pid, (before_url, after_url) in tiles.items():
+            group_results[pid]["before_tile_url"] = before_url
+            group_results[pid]["after_tile_url"]  = after_url
     else:
         for _, r in group.iterrows():
             pid = str(r["project_id"])
-            group_results[pid]["before_thumb_url"] = None
-            group_results[pid]["after_thumb_url"]  = None
+            group_results[pid]["before_tile_url"] = None
+            group_results[pid]["after_tile_url"]  = None
 
     return group_results
 
@@ -560,22 +589,41 @@ def run(input_csv, output_csv, project=None, test=False,
     df["start_year"]      = df["start_year"].astype(int)
     df["completion_year"] = df["completion_year"].astype(int)
 
-    n_date_groups = df.groupby(["start_year", "completion_year"]).ngroups
-    print(f"\n[INFO] {len(df):,} projects | {n_date_groups} unique date groups")
+    # ── CHECKPOINT: resume from partial run if checkpoint file exists ──────────
+    # Checkpoint file sits next to the output CSV, named <output>_checkpoint.csv
+    checkpoint_csv = output_csv.replace(".csv", "_checkpoint.csv")
+    all_results    = []
+    done_ids       = set()
+
+    if os.path.exists(checkpoint_csv):
+        checkpoint_df = pd.read_csv(checkpoint_csv, dtype={"project_id": str})
+        all_results   = checkpoint_df.to_dict("records")
+        done_ids      = set(checkpoint_df["project_id"].astype(str))
+        print(f"[RESUME] Checkpoint found: {len(done_ids)} projects already done, skipping them.")
+    else:
+        print(f"[CHECKPOINT] No checkpoint found — starting fresh. Progress saved to: {checkpoint_csv}")
+
+    # Filter out already-processed projects before batching
+    df_remaining = df[~df["project_id"].astype(str).isin(done_ids)].copy()
+
+    n_date_groups = df_remaining.groupby(["start_year", "completion_year"]).ngroups
+    print(f"\n[INFO] {len(df):,} total projects | {len(done_ids)} already done | {len(df_remaining):,} remaining")
+    print(f"[INFO] {n_date_groups} unique date groups remaining")
     print(f"[INFO] Batch size:        {BATCH_SIZE}")
     print(f"[INFO] Spectral workers:  {spectral_workers} (parallel date groups)")
     print(f"[INFO] Thumbnail workers: {thumb_workers if not skip_thumbs else 0} {'(skipped)' if skip_thumbs else '(parallel per group)'}")
     print(f"[INFO] Max concurrent GEE requests: ~{spectral_workers * (3 + thumb_workers)}\n")
 
-    all_results = []
-    batches     = [df.iloc[i:i+BATCH_SIZE] for i in range(0, len(df), BATCH_SIZE)]
+    batches = [df_remaining.iloc[i:i+BATCH_SIZE] for i in range(0, len(df_remaining), BATCH_SIZE)]
 
     for i, batch in enumerate(tqdm(batches, desc="Batches")):
         print(f"\n[BATCH {i+1}/{len(batches)}] {len(batch)} projects", flush=True)
-        all_results.extend(
-            process_batch(batch, skip_thumbs, spectral_workers, thumb_workers)
-        )
-        time.sleep(0.3)   # gentle pause between batches
+        batch_results = process_batch(batch, skip_thumbs, spectral_workers, thumb_workers)
+        all_results.extend(batch_results)
+
+        # 💾 Write checkpoint after every batch so a crash never loses more than one batch
+        pd.DataFrame(all_results).to_csv(checkpoint_csv, index=False)
+        print(f"  [CHECKPOINT] {len(all_results)}/{len(df)} projects saved → {checkpoint_csv}", flush=True)
 
     results_df = pd.DataFrame(all_results)
 
@@ -597,6 +645,11 @@ def run(input_csv, output_csv, project=None, test=False,
     )
 
     output_df.to_csv(output_csv, index=False)
+
+    # ── CHECKPOINT CLEANUP: remove checkpoint now that final output is written ──
+    if os.path.exists(checkpoint_csv):
+        os.remove(checkpoint_csv)
+        print(f"[CHECKPOINT] Removed {checkpoint_csv} (run complete)")
 
     print(f"\n[DONE] -> {output_csv}")
     print(f"[INFO] {len(output_df):,} rows saved")

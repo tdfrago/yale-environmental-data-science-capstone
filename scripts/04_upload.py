@@ -1,8 +1,11 @@
 """
 04_upload.py
 ============
-1. Generates GEE before/after thumbnail URLs for each project
+1. Generates permanent GEE before/after tile URLs for each project (via getMapId)
 2. Uploads everything to Supabase in batches
+
+Tile URLs (getMapId) are permanent — no expiry, no re-generation needed.
+Thumbnail URLs (getThumbURL) expire in ~2 days — do NOT use those.
 
 Run the SQL at the bottom of this file in your Supabase SQL editor FIRST,
 then run this script.
@@ -14,7 +17,7 @@ Usage:
         --key YOUR_SERVICE_ROLE_KEY
 
 Args:
-    --skip-thumbs   Skip thumbnail generation if you already have them
+    --skip-tiles    Skip tile URL generation if already present in CSV
     --gee-project   GEE cloud project ID (optional)
 
 ---- SUPABASE SCHEMA — paste into Supabase SQL editor ----
@@ -42,9 +45,9 @@ create table projects (
   neighbour_mean_ibi      float,
   anomalous_vs_neighbourhood bool,
 
-  -- GEE thumbnails
-  before_thumb_url        text,
-  after_thumb_url         text,
+  -- GEE permanent tile URLs (via getMapId — no expiry)
+  before_tile_url         text,
+  after_tile_url          text,
 
   -- Spectral deltas — tight window (mean @ 30m)
   tight_ibi   float, tight_bui   float, tight_ndvi  float, tight_ndbi  float,
@@ -85,61 +88,67 @@ create index on projects using gin(
 import ee
 import pandas as pd
 import argparse
-import time
 from tqdm import tqdm
 from supabase import create_client
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 BATCH_SIZE   = 500   # rows per Supabase upsert
-GEE_BATCH    = 30    # projects per thumbnail batch (GEE memory limit)
-THUMB_SIZE   = 256   # pixels — small enough to be fast, clear enough to use
-THUMB_BANDS  = ["B4", "B3", "B2"]   # true colour RGB
-THUMB_GAMMA  = 1.4
+GEE_BATCH    = 30    # projects per tile URL batch
+THUMB_BUFFER = 500   # metres — buffer around project point for tile viewport
 
 DRY_START = "11-01"
 DRY_END   = "04-30"
 CLOUD_FLT = 60
 
 
-# ── GEE THUMBNAIL HELPERS ─────────────────────────────────────────────────────
+# ── GEE TILE URL HELPERS ──────────────────────────────────────────────────────
 
-def get_composite_for_thumb(lat, lon, start_date, end_date):
-    """Build a small true-colour composite for thumbnail display."""
-    pt  = ee.Geometry.Point([lon, lat]).buffer(300).bounds()
-    col = (
-        ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
-          .filterBounds(pt)
-          .filterDate(start_date, end_date)
-          .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", CLOUD_FLT))
-          .map(lambda img: img.divide(10000)
-               .updateMask(img.select("SCL").neq(9).And(img.select("SCL").neq(3)))
-               .copyProperties(img, ["system:time_start"]))
-          .median()
-          .select(THUMB_BANDS)
-    )
-    return col
+def make_tile_url(lat, lon, start_date, end_date):
+    """
+    Return a permanent XYZ tile URL via getMapId().
 
+    Unlike getThumbURL() which returns a signed JPEG that expires in ~2 days,
+    getMapId() returns a tile endpoint that is permanent and public — tiles
+    stream on demand from GEE with no re-authentication needed.
 
-def make_thumb_url(lat, lon, start_date, end_date):
-    """Return a signed JPEG thumbnail URL from GEE."""
+    The returned URL contains {z}/{x}/{y} placeholders used directly by Leaflet:
+      L.tileLayer(url).addTo(map)
+    """
     try:
-        img = get_composite_for_thumb(lat, lon, start_date, end_date)
-        pt  = ee.Geometry.Point([lon, lat]).buffer(500).bounds()
-        url = img.getThumbURL({
-            "bands":      THUMB_BANDS,
-            "region":     pt,
-            "dimensions": THUMB_SIZE,
-            "gamma":      THUMB_GAMMA,
-            "format":     "jpg",
+        pt  = ee.Geometry.Point([lon, lat])
+        aoi = pt.buffer(THUMB_BUFFER).bounds()
+
+        def make_col(start, end, max_cloud):
+            return (
+                ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+                  .filterBounds(aoi)
+                  .filterDate(start, end)
+                  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", max_cloud))
+                  .map(lambda img: img.divide(10000)
+                       .updateMask(img.select("SCL").neq(9).And(img.select("SCL").neq(3)))
+                       .copyProperties(img, ["system:time_start"]))
+                  .select(["B4", "B3", "B2"])
+            )
+
+        col      = make_col(start_date, end_date, CLOUD_FLT)
+        fallback = make_col(f"{start_date[:4]}-01-01", f"{start_date[:4]}-12-31", 80)
+        col      = ee.ImageCollection(ee.Algorithms.If(col.size().gte(3), col, fallback))
+
+        map_id = col.median().getMapId({
+            "bands": ["B4", "B3", "B2"],
+            "min":   0.02,
+            "max":   0.25,
+            "gamma": 1.4,
         })
-        return url
+        return map_id["tile_fetcher"].url_format
+
     except Exception as exc:
-        print(f"\n[WARN] Thumbnail failed ({lat},{lon}): {exc}")
+        print(f"\n[WARN] Tile URL failed ({lat},{lon}): {exc}")
         return None
 
 
-def generate_thumbnails(batch_df):
-    """Generate before/after URLs for a batch of projects."""
+def generate_tile_urls(batch_df):
+    """Generate before/after permanent tile URLs for a batch of projects."""
     results = {}
     for _, row in batch_df.iterrows():
         pid = str(row["project_id"])
@@ -148,14 +157,13 @@ def generate_thumbnails(batch_df):
         lat = float(row["latitude"])
         lon = float(row["longitude"])
 
-        bs = f"{sy-1}-{DRY_START}";  be = f"{sy}-{DRY_END}"
-        as_= f"{cy}-{DRY_START}";   ae = f"{cy+1}-{DRY_END}"
+        bs  = f"{sy-1}-{DRY_START}";  be  = f"{sy}-{DRY_END}"
+        as_ = f"{cy}-{DRY_START}";    ae  = f"{cy+1}-{DRY_END}"
 
         results[pid] = (
-            make_thumb_url(lat, lon, bs, be),
-            make_thumb_url(lat, lon, as_, ae),
+            make_tile_url(lat, lon, bs, be),
+            make_tile_url(lat, lon, as_, ae),
         )
-        time.sleep(0.1)
     return results
 
 
@@ -169,9 +177,9 @@ SCHEMA_COLS = [
     "ghost_probability", "ghost_tier", "signal_pattern",
     "signal_interpretation", "coord_displacement",
     "neighbour_mean_ibi", "anomalous_vs_neighbourhood",
-    "before_thumb_url", "after_thumb_url",
-    "before_scene_count", "after_scene_count",   # data quality flags
-    "composite_valid", "data_quality",            # data quality flags
+    "before_tile_url", "after_tile_url",            # permanent GEE tile URLs
+    "before_scene_count", "after_scene_count",      # data quality flags
+    "composite_valid", "data_quality",
     # tight
     "tight_ibi","tight_bui","tight_ndvi","tight_ndbi",
     "tight_mndwi","tight_tcb","tight_tcg","tight_tcw","tight_ndti",
@@ -218,15 +226,15 @@ def upload(df, client, table="projects"):
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 
 def run(input_csv, supabase_url, supabase_key,
-        gee_project=None, table="projects", skip_thumbs=False):
+        gee_project=None, table="projects", skip_tiles=False):
 
     # Init GEE
-    if not skip_thumbs:
+    if not skip_tiles:
         try:
             ee.Initialize(project=gee_project) if gee_project else ee.Initialize()
-            print("[GEE] ✓ Ready for thumbnails")
+            print("[GEE] ✓ Ready for tile URL generation")
         except Exception as e:
-            print(f"[GEE] ✗ {e} — run with --skip-thumbs to skip thumbnail generation")
+            print(f"[GEE] ✗ {e} — run with --skip-tiles to skip tile URL generation")
             raise
 
     # Init Supabase
@@ -236,20 +244,23 @@ def run(input_csv, supabase_url, supabase_key,
     df = pd.read_csv(input_csv)
     print(f"[INFO] {len(df):,} projects loaded")
 
-    # ── Thumbnail generation ──────────────────────────────────────────────────
-    if not skip_thumbs and "before_thumb_url" not in df.columns:
-        print(f"[INFO] Generating thumbnails in batches of {GEE_BATCH}...")
-        thumbs = {}
+    # ── Tile URL generation ───────────────────────────────────────────────────
+    # Skip if CSV already has tile URLs (e.g. from 02_pipeline.py with getMapId)
+    if not skip_tiles and "before_tile_url" not in df.columns:
+        print(f"[INFO] Generating tile URLs in batches of {GEE_BATCH}...")
+        tiles   = {}
         batches = [df.iloc[i:i+GEE_BATCH] for i in range(0, len(df), GEE_BATCH)]
-        for batch in tqdm(batches, desc="GEE thumbnails"):
-            thumbs.update(generate_thumbnails(batch))
+        for batch in tqdm(batches, desc="GEE tile URLs"):
+            tiles.update(generate_tile_urls(batch))
 
-        df["before_thumb_url"] = df["project_id"].astype(str).map(
-            lambda pid: thumbs.get(pid, (None, None))[0]
+        df["before_tile_url"] = df["project_id"].astype(str).map(
+            lambda pid: tiles.get(pid, (None, None))[0]
         )
-        df["after_thumb_url"]  = df["project_id"].astype(str).map(
-            lambda pid: thumbs.get(pid, (None, None))[1]
+        df["after_tile_url"]  = df["project_id"].astype(str).map(
+            lambda pid: tiles.get(pid, (None, None))[1]
         )
+    elif "before_tile_url" in df.columns:
+        print("[INFO] Tile URLs already present in CSV — skipping GEE generation")
 
     # ── Upload ────────────────────────────────────────────────────────────────
     print(f"[INFO] Uploading to table '{table}'...")
@@ -266,6 +277,7 @@ if __name__ == "__main__":
     parser.add_argument("--key",         required=True,  help="Supabase service role key")
     parser.add_argument("--gee-project", default=None)
     parser.add_argument("--table",       default="projects")
-    parser.add_argument("--skip-thumbs", action="store_true")
+    parser.add_argument("--skip-tiles",  action="store_true",
+                        help="Skip tile URL generation (use if CSV already has before_tile_url/after_tile_url)")
     args = parser.parse_args()
-    run(args.input, args.url, args.key, args.gee_project, args.table, args.skip_thumbs)
+    run(args.input, args.url, args.key, args.gee_project, args.table, args.skip_tiles)
