@@ -117,7 +117,7 @@ gist/
 |   ├── 03_score.py             # classify signal patterns, ghost probability score
 |   └── 04_upload.py            # push results and thumbnails to Supabase
 |
-├── dashboard/
+├── docs/
 |   └── index.html              # GIST dashboard, single-file, GitHub Pages ready
 |
 ├── outputs/
