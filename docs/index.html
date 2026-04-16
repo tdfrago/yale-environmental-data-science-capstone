@@ -452,28 +452,45 @@ const hasNoData = r => (r.data_quality && r.data_quality !== 'ok' && r.data_qual
 
 // ── Header stats ─────────────────────────────────────────────────────────────
 async function loadStats() {
-  // Exclude projects where all IBI values are null (black composites / bad data)
-  // Those are counted separately as 'No Data' and should not inflate ghost/suspect/legit
-  const goodData = sb.from(TABLE).select('tight_ibi,broad_ibi,anywhere_ibi,data_quality,ghost_probability')
-  const { data: allRows } = await goodData
-  if (!allRows) return
+  // Use server-side count queries with head:true — returns only the count,
+  // no row data. This avoids Supabase's 1,000-row default limit which
+  // caused incorrect counts when the table grew beyond 1,000 projects.
+  //
+  // ghost_tier column set by scorer:
+  //   "ghost"   = prob >= 0.70
+  //   "suspect" = prob 0.40-0.69
+  //   "built"   = prob < 0.40
+  //   "no_data" = insufficient satellite data (excluded from counts)
+  try {
+    const [
+      { count: total   },
+      { count: ghost   },
+      { count: suspect },
+      { count: legit   },
+    ] = await Promise.all([
+      sb.from(TABLE).select('*', { count: 'exact', head: true })
+                    .neq('ghost_tier', 'no_data'),
+      sb.from(TABLE).select('*', { count: 'exact', head: true })
+                    .eq('ghost_tier', 'ghost'),
+      sb.from(TABLE).select('*', { count: 'exact', head: true })
+                    .eq('ghost_tier', 'suspect'),
+      sb.from(TABLE).select('*', { count: 'exact', head: true })
+                    .eq('ghost_tier', 'built'),
+    ])
 
-  const valid   = allRows.filter(r => !hasNoData(r))
-  const nodata  = allRows.filter(r =>  hasNoData(r))
-  const ghost   = valid.filter(r => r.ghost_probability >= 0.7)
-  const suspect = valid.filter(r => r.ghost_probability >= 0.4 && r.ghost_probability < 0.7)
-  const legit   = valid.filter(r => r.ghost_probability < 0.4)
-
-  document.getElementById('stat-total').textContent   = allRows.length.toLocaleString()
-  document.getElementById('stat-ghost').textContent   = ghost.length.toLocaleString()
-  document.getElementById('stat-suspect').textContent = suspect.length.toLocaleString()
-  document.getElementById('stat-legit').textContent   = legit.length.toLocaleString()
-  document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleDateString('en-PH', { year:'numeric', month:'short', day:'numeric' })
+    document.getElementById('stat-total').textContent   = (total   || 0).toLocaleString()
+    document.getElementById('stat-ghost').textContent   = (ghost   || 0).toLocaleString()
+    document.getElementById('stat-suspect').textContent = (suspect || 0).toLocaleString()
+    document.getElementById('stat-legit').textContent   = (legit   || 0).toLocaleString()
+    document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleDateString('en-PH', { year:'numeric', month:'short', day:'numeric' })
+  } catch(e) {
+    console.warn('loadStats failed:', e)
+  }
 }
 
 // ── Year filter ───────────────────────────────────────────────────────────────
 async function loadYears() {
-  const { data } = await sb.from(TABLE).select('completion_year').order('completion_year')
+  const { data } = await sb.from(TABLE).select('completion_year').order('completion_year').limit(10000)
   if (!data) return
   const years = [...new Set(data.map(r => r.completion_year))].sort()
   const sel = document.getElementById('filter-year')

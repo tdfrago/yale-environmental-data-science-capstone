@@ -14,8 +14,7 @@ This project uses Sentinel-2 satellite imagery and Google Earth Engine to verify
 
 ## Data Status
 
-- Current dataset: **500 data points**
-- Ingestion in progress: **+24,000 records**
+- Current dataset: **+24,000 records**
 ---
 
 ## Project Rationale
