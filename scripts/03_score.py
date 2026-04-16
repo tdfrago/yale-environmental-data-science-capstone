@@ -159,14 +159,41 @@ def ghost_probability(row):
     # ── DATA QUALITY GATE ────────────────────────────────────────────────────
     # Black images = zero composite = delta = 0 everywhere = T-B-A- = false ghost.
     # If either composite was built from < 3 cloud-free scenes, the delta is
-    # meaningless. Cap at 0.5 (uncertain) instead of scoring as ghost.
-    # Default to 99 if columns missing (old runs without scene counting).
+    # meaningless. Return NaN so the project gets tier "no_data" and is
+    # excluded from ghost/suspect/built counts entirely.
+    #
+    # FIX 1: composite_valid is stored as a string in CSV ("True"/"False").
+    # Must parse explicitly — non-empty strings are always truthy in Python,
+    # so `not "False"` evaluates to False and the gate never fires without this.
+    #
+    # FIX 2: Cap was 0.50 which still scored as "suspect" (>=0.40 threshold).
+    # Now returns NaN so ghost_tier() maps it to "no_data" instead.
     before_n = row.get("before_scene_count", 99)
     after_n  = row.get("after_scene_count",  99)
     valid    = row.get("composite_valid",     True)
 
-    if not valid or (before_n is not None and before_n < 3) or                     (after_n  is not None and after_n  < 3):
-        return 0.50   # uncertain — insufficient satellite data, not a ghost signal
+    # Parse string boolean that comes back from CSV read
+    if isinstance(valid, str):
+        valid = valid.strip().lower() == "true"
+
+    # Catch all-null IBI — black composite that passed scene count check
+    def _is_null(v):
+        return v is None or (isinstance(v, float) and np.isnan(v))
+
+    all_ibi_null = (
+        _is_null(row.get("tight_ibi")) and
+        _is_null(row.get("broad_ibi")) and
+        _is_null(row.get("anywhere_ibi"))
+    )
+
+    # Scene count check — guard against NaN values in count columns
+    def _scene_too_low(n):
+        if n is None: return False
+        if isinstance(n, float) and np.isnan(n): return False
+        return int(n) < 3
+
+    if not valid or all_ibi_null or _scene_too_low(before_n) or _scene_too_low(after_n):
+        return np.nan   # no score — insufficient data, not a ghost signal
 
     # ── 1. Get pattern anchor ────────────────────────────────────────────────
     pattern = row.get("signal_pattern", "")
@@ -206,6 +233,9 @@ def ghost_probability(row):
 
 
 def ghost_tier(prob):
+    # NaN = insufficient satellite data, not scoreable
+    if prob is None or (isinstance(prob, float) and np.isnan(prob)):
+        return "no_data"
     if prob >= 0.70:
         return "ghost"
     elif prob >= 0.40:
@@ -281,11 +311,14 @@ def run(input_csv, output_csv):
     def get_data_quality(row):
         b = row.get("before_scene_count")
         a = row.get("after_scene_count")
+        # Handle NaN from CSV — treat as missing
+        if isinstance(b, float) and np.isnan(b): b = None
+        if isinstance(a, float) and np.isnan(a): a = None
         # If columns missing (old pipeline run), mark as unknown
         if b is None and a is None:  return "unknown"
         if b == 0 and a == 0:        return "no_data"
-        if b is not None and b < 3:  return "sparse_before"
-        if a is not None and a < 3:  return "sparse_after"
+        if b is not None and int(b) < 3:  return "sparse_before"
+        if a is not None and int(a) < 3:  return "sparse_after"
         return "ok"
 
     df["data_quality"] = df.apply(get_data_quality, axis=1)
@@ -321,15 +354,20 @@ def run(input_csv, output_csv):
     print(f"\n[COORDINATE DISPLACEMENT]")
     print(df["coord_displacement"].value_counts().to_string())
 
+    no_data = df[df["ghost_tier"] == "no_data"]
+    scored  = df[df["ghost_tier"] != "no_data"]
     print(f"\n[HIGHLIGHTS]")
-    print(f"  Ghost   (>70%):     {len(ghost):,}   ({len(ghost)/len(df)*100:.1f}%)")
-    print(f"  Suspect (40-70%):   {len(suspect):,}   ({len(suspect)/len(df)*100:.1f}%)")
-    print(f"  Built   (<40%):     {len(built):,}   ({len(built)/len(df)*100:.1f}%)")
-    print(f"  Coord displaced:    {len(displaced):,}   ← verify GPS, not ghost")
+    print(f"  Ghost   (>70%):       {len(ghost):,}   ({len(ghost)/len(scored)*100:.1f}% of scored)")
+    print(f"  Suspect (40-70%):     {len(suspect):,}   ({len(suspect)/len(scored)*100:.1f}% of scored)")
+    print(f"  Built   (<40%):       {len(built):,}   ({len(built)/len(scored)*100:.1f}% of scored)")
+    print(f"  No satellite data:    {len(no_data):,}   (excluded from counts)")
+    print(f"  Coord displaced:      {len(displaced):,}   ← verify GPS, not ghost")
 
     # Expected baseline: ~5% ghost (COA confirmed rate across all DPWH)
     # Flood control is higher risk — expect 8-15% ghost in this subset
-    ghost_rate = len(ghost) / len(df) * 100
+    # Exclude no_data projects from rate — they have no valid spectral signal
+    scored     = df[df["ghost_tier"] != "no_data"]
+    ghost_rate = len(ghost) / len(scored) * 100 if len(scored) > 0 else 0
     print(f"\n[BASELINE CHECK]")
     print(f"  Ghost rate: {ghost_rate:.1f}%")
     if ghost_rate < 3:
@@ -349,7 +387,7 @@ def run(input_csv, output_csv):
 
     print(f"\nNext: python 04_upload.py --input {output_csv} "
           f"--url https://rqnjuyxbfvzzwuwggrqe.supabase.co "
-          f"--key YOUR_KEY --skip-thumbs")
+          f"--key YOUR_KEY --skip-tiles")
 
 
 if __name__ == "__main__":
